@@ -2,10 +2,12 @@
 # -*- coding: utf-8 -*-
 # By yongcong.wang @ 08/12/2020
 
-import torch.utils.data.Dataset
+import torch.utils.data
+from copy import deepcopy
+import numpy as np
 
 
-class FrameDataset(Dataset):
+class FrameDataset(torch.utils.data.Dataset):
     """Dataset to process csv file
     """
     def __init__(self, path, length=20):
@@ -25,115 +27,94 @@ class FrameDataset(Dataset):
         """
         return self.data_packets[idx]
 
-    def read_csv(self, path):
-        """Read csv data from file
-
-        Read csv data from file and ~Translate data
-        from 
-        [[frame_num0,1,2...], [pedestrian_id0,1,2...], [y0,1,2...], [x0,1,2...]]
-        to
-        [[frame_num0, pedestrian_id0, x0, y0],
-         [frame_num1, pedestrian_id1, x1, y1],
-         [frame_num2, pedestrian_id2, x2, y2],
-         ...
-         ]
-        """
-        file_data = []
-        with open(path, "r") as file:
-            line_data = [int(float(data)) if i < 2 else float(data) for
-                         i, data in enumerate(line.rsplit())]
-            line_data[2], line_data[3] = line_data[3], line_data[2]
-            file_data.append(line_data)
-
-        return file_data
-
-    def extract_data(self, data, length):
+    def extract_data(self, csv, length):
         """Generate data_packet for each pedestrian with time longer than length
         return all packets
         """
-        file_data = deepcopy(data)
-        # sort by frame number
-        file_data = sorted(file_data, key=lambda data : data[0])
-        time_step = 0
-        for i in range(len(file_data) - 1):
-            time_step = file_data[i+1][0] - file_data[i][0]
-            if timestamp != 0:
-                break
 
+        #step = self.get_frame_step(csv)
+        step = 10
         # search pedestrian with the trajectory time longer than length
-        time_stamps = self.get_length_timestamps(file_data, length)
+        pedestrians = self.get_pedestrians_of_length(csv, length * step)
 
         # generate data_packet for each pedestrian got in above step.
         data_packets = []
-        for (traj_idx, t_s, t_e) in time_stamps:
-            traj_data = self.get_data_in_time(
-                data, t_s, t_s + (length + 1) * time_step)
-            traj_list, participant_masks, off_data, coord_data =
-                self.generate_batch_data(traj_data);
+        for (traj_idx, t_s, t_e) in pedestrians:
+            traj_data = self.get_data_in_time(csv, t_s, t_e, step)
+            traj_data = sorted(traj_data, key=lambda data : data[0])  # by frame
+            ped_ids, ped_masks, ped_trajs, = \
+                self.text_to_frame_tensor(traj_data)
+
             data_packet = {
-                "traj_list" : traj_list,
-                "mask" : participant_masks,
-                "seq" : off_data,
-                "coord" : coord_data
+                "ped_ids" : deepcopy(ped_ids),
+                "ped_masks" : deepcopy(ped_masks),
+                "ped_trajs" : deepcopy(ped_trajs),
                 }
             data_packets.append(data_packet)
 
         return data_packets
 
-    def get_length_timestamps(self, data, length):
+    def read_csv(self, path):
+        """Read csv data from file
+
+        Read csv data from file and translate data from string to value
+        [[frame_num0,1,2...], [pedestrian_id0,1,2...], [y0,1,2...], [x0,1,2...]]
+        """
+        with open(path, "r") as csv:
+            file_data = [[float(data) for data in line.rsplit(",")]
+                         for line in csv]
+            file_data[0] = [int(ele) for ele in file_data[0]]
+            file_data[1] = [int(ele) for ele in file_data[1]]
+            file_data[2], file_data[3] = file_data[3], file_data[2]
+            return file_data
+
+        return []
+
+    def get_frame_step(self, data):
+        """Frame step
+        """
+        frames = deepcopy(data[0])
+        frames = sorted(list(set(frames)))
+        frame_step = min([ele - frames[i - 1] if i > 0 else 100
+                          for i, ele in enumerate(frames)])
+
+        return frame_step
+
+    def get_pedestrians_of_length(self, csv, length):
         """Get pedestrian's id with the duration bigger than length
         return: [pedestrian_id, start_time, end_time]
         """
-        file_data = deepcopy(data)
-        file_data = sorted(file_data, key=lambda data : data[1])
+        data = deepcopy(csv[0:2])
+        data = sorted(np.array(data).T.tolist(), key=lambda line : line[1])
 
-        time_stamps = []
-        temp_traj_idx = file_data[0][1]
-        cnt = 0
-
-        (t_s, t_e) = (file_data[0][0], file_data[0][0])
-
-        for i, line in enumerate(file_data):
-            if line[1] == temp_traj_idx:
-                cnt += 1
+        left = 0
+        right = 0
+        res = []
+        while right < len(data):
+            if data[left][1] == data[right][1]:
+                right += 1
                 continue
-            if cnt >= length:
-                t_e = line[0]
-                time_stamps.append((temp_traj_idx, t_s, file_data[i-1][0]))
-            temp_traj_idx = line[1]
-            cnt = 0
-            t_s = line[0]
+            frames = [data[i][0] for i in range(left, right)]
+            if (max(frames) - min(frames)) > length:
+                res.append([data[left][1], min(frames), max(frames)])
 
-        return time_stamps
+            left = right
+            right += 1
 
-    def get_data_in_time(self, data, t_s, t_e):
+        return res
+
+    def get_data_in_time(self, csv, t_s, t_e, step):
         """Extract data between start_time and end_time
         """
-        file_data = deepcopy(data)
-        file_data = sorted(file_data, key=lambda data : data[0])
+        data = deepcopy(csv)
+        data = np.array(data).T.tolist()
+        data = sorted(data, key=lambda line : line[0])
 
-        return [line if t_s <= line[0] <= t_e for line in file_data]
-
-    def generate_batch_data(self, data):
-        file_data = sorted(data, key=lambda data : data[1])  # by ped_id
-        file_data_sort = sorted(data, key=lambda data : data[0])  # by frame
-
-        ped_id_list, frame_masks, coord_tensors =
-            self.text_to_frame_tensor(file_data_sort)
-        
-        # use position(x,y) offset, not the global coord
-        file_data_off = []
-        for i, line in enumerate(file_data):
-            if i > 0 and if file_data[i][1] == file_data[i-1][1]:
-                file_data_off.append([file_data[i - 1][0], file_data[i - 1][1],
-                                      file_data[i][2] - file_data[i - 1][2],
-                                      file_data[i][3] - file_data[i - 1][3]])
-        file_data_off.sort(key=lambda data : data[0])        
-        
-        ped_id_list, participant_masks, offset_tensors =
-            self.tex_to_frame_tensor(file_data_off)
-
-        return ped_id_list, frame_masks, offset_tensors, coord_tensors
+        res = []
+        for line in data:
+            if t_s <= line[0] <= t_e and int((line[0] - t_s) % step) == 0:
+                res.append(line)
+        return res
 
     def text_to_frame_tensor(self, data):
         """Turn data to a list of pedestrian id and trajectory in each frame
@@ -142,47 +123,51 @@ class FrameDataset(Dataset):
         frame_mask: a list of available pedestrian's id in each frame
         frame_tensors: a list of pedestrian id and trajectory in each frame
         """
-        # unique list
-        ped_id_list = list(set([line[1] for line in data])).sort()
-        frame_list = list(set([line[0] for line in data])).sort()
-
         # split line to groups with same frame
-        data_temp = []
+        left = 0
+        right = 0
         frames = []
-        last_frame = data[0][0]
-        for line in data:
-            if line[0] == frame_num:
-                data_temp.append(line)
+        while right < len(data):
+            if int(data[left][0]) == int(data[right][0]):
+                right += 1
                 continue
-            data_temp.sort(key=lambda data : data[1])
-            frames.append(data_temp)
-            data_temp = [line]
-            frame_num = line[0]
+            curr_frames = sorted([data[i] for i in range(left, right)],
+                                 key=lambda line : line[1])
+            frames.append(curr_frames)
 
-        # get pedestrian(traj) ids in each frame
-        frame_trajs = [[]] * len(frames)
-        for frame_idx, line in enumerate(frames):
-            for traj_idx, traj in enumerate(ped_id_list):
-                in_flag = False
-                for data in line:
-                    if data[1] == traj:
-                        in_flag = True
-                        frame_trajs[frame_idx].append(
-                            ped_id_list.index(data[1]))
-                if not in_flag:
-                    frames[frame_idx].append(
-                        [frame_list[frame_idx], traj, 0., 0.])
-            frames[frame_idx].sort(key=lambda data : data[1])
+            left = right
+            right += 1
+
+        # unique list
+        ped_list = sorted(list(set([int(line[1]) for line in data])))
+        patch_frames = [[[ped, 0., 0.] for ped in ped_list] for f in frames]
+        mask_frames = [[0. for ped in ped_list] for f in frames]
+        for frame_idx, frame in enumerate(patch_frames):
+            frame_ped_list = [int(ped[1]) for ped in frames[frame_idx]]
+            for ped_idx, ped in enumerate(ped_list):
+                if ped in frame_ped_list:
+                    index = frame_ped_list.index(ped)
+                    frame[ped_idx][1] = frames[frame_idx][index][2]
+                    frame[ped_idx][2] = frames[frame_idx][index][3]
+                    mask_frames[frame_idx][ped_idx] = 1.
 
         device = torch.device("cuda:0" if torch.cuda.is_available() else 'cpu')
-        frame_tensors = torch.tensor(frames, device=device)
-
-        # mask the pedestrian(traj) ids in ped_id_list for each frame
-        frame_masks = []
-        for frame_idx, line in enumerate(frame_trajs):
-            fram_masks.append(
-                [[torch.tensor(1.) if i in frame_trajs[frame_idx] else
-                  torch.tensor(0.) for i in range(len(ped_id_list))]])
-        frame_masks = torch.tensor(frame_masks, device=device)
+        frame_tensors = torch.tensor(patch_frames, device=device)
+        frame_masks = torch.tensor(mask_frames, device=device)
         
-        return ped_id_list, frame_masks, frame_tensors
+        return ped_list, frame_masks, frame_tensors
+
+if __name__ == "__main__":
+    file_names = [
+        "./data/eth/hotel/pixel_pos_interpolate.csv",
+        "./data/eth/univ/pixel_pos_interpolate.csv",
+        "./data/ucy/univ/pixel_pos_interpolate.csv",
+        "./data/ucy/zara/zara01/pixel_pos_interpolate.csv",
+        #"./data/ucy/zara/zara02/pixel_pos_interpolate.csv"
+        ]
+
+    for file_name in file_names:
+        file_data = FrameDataset(file_name)
+        for line in file_data:
+            print(line["ped_masks"])
+            break;

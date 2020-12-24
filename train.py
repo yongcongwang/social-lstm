@@ -4,9 +4,11 @@
 
 import torch
 import argparse
+from torch.utils.tensorboard import SummaryWriter
 
 import model
 import dataset
+from visualization import Visualization
 
 
 def parse_args():
@@ -22,52 +24,84 @@ def parse_args():
     parser.add_argument("--T_pred", default=20, type=int)    
     parser.add_argument("--epoch", default=25, type=int)
     parser.add_argument("--model_name", default="a_just_trained_model_for_")
-    parser.add_argument("model_type", type=str)
     parser.add_argument("--pure_val_name", default='', type=str)
 
     return parser.parse_args()
 
 
-def train(T_obs, T_pred, file_name, epoch_size=5):
-    network = model.SocialLSTM(hidden_dim=128, mediate_dim=32, output_dim=2)
+def train(T_obs, T_pred, file_names, epoch_size=50):
+    print("-------------------------------------------")
+    writer = SummaryWriter("./log/loss")
+    vis = Visualization()
+    device = torch.device("cuda:0" if torch.cuda.is_available() else 'cpu')
+    network = model.SocialLstm(hidden_dim=128, mediate_dim=32, output_dim=2)
+    network.to(device)
+    #network = torch.load("./log/model/559_model.pt")
+    #network.eval()
+    #network.to(device)
 
-    criterion = nn.MSELoss(reduction="sum")
-    optimizer = torch.optim.Adam(vl.parameters(), weight_decay=0.0005)
+    criterion = torch.nn.MSELoss(reduction="sum")
+    optimizer = torch.optim.Adam(network.parameters(), weight_decay=0.0005)
 
+    loss = 0.
     for epoch in range(epoch_size):
-        data = dataset.FrameDataset(file_name):
-
-            for idx, data in enumerate(data):
-                h = torch.zeros(data["seq"].shape[1], h_dim, device=device)
-                c = torch.zeros(data["seq"].shape[1], h_dim, device=device)
+        cost_sum = 0.
+        cost_cnt = 0
+        for file_name in file_names:
+            file_data = dataset.FrameDataset(file_name)
+            print(file_name)
+            for (idx, data) in enumerate(file_data):
+                h = torch.zeros(data["ped_trajs"].shape[1], 128, device=device)
+                c = torch.zeros(data["ped_trajs"].shape[1], 128, device=device)
+                optimizer.zero_grad()
 
                 with torch.autograd.set_detect_anomaly(True):
-                    Y = data["seq"][:T_pred, :, 2:].clone()
-                    input_seq = data["seq"][:T_pred, :, 2:].clone()
-                    coords = data["coord"][:T_pred, :, 2:].clone()
-                    part_masks = data["mask"]
+                    Y = data["ped_trajs"][:T_pred, :, 1:].clone()
+                    trajs = data["ped_trajs"][:T_pred, :, 1:].clone()
+                    traj_masks = data["ped_masks"]
 
                     # forward propagation
                     output = network.forward(
-                        input_seq, coords, part_masks, h, c, Y, T_obs, T_pred)
+                        trajs, traj_masks, h, c, Y, T_obs, T_pred)
 
                     # loss
                     Y_pred = output[T_obs + 1 : T_pred]
                     Y_g = Y[T_obs + 1 : T_pred]
 
                     cost = criterion(Y_pred, Y_g)
-                    print(epoch, idx, cost.item())
+                    cost_sum += cost.item()
+                    cost_cnt += 1
+                    if cost_cnt % 50 == 0:
+                        vis.plot(
+                            Y[:T_pred, :, :].clone().detach().cpu().tolist(),
+                            output[:T_pred, :, :].clone().detach(
+                                ).cpu().tolist(),
+                            T_obs, T_pred
+                            )
 
                     # backward propagation
-                    optimizer.zero_grad()
                     cost.backward()
                     optimizer.step()
+
+        loss = cost_sum / cost_cnt
+        print("epoch: ", epoch, "loss: ", loss)
+        writer.add_scalar("Loss/train", loss)
+
+    torch.save(network, "./log/model/" + str(int(loss * 100)) + "_model.pt")
+    writer.close()
 
 
 def main():
     args = parse_args()
 
-    train(8, 20, "./data/eth/hotel/pixel_pos.csv")
+    file_names = [
+        "./data/eth/hotel/pixel_pos_interpolate.csv",
+        "./data/eth/univ/pixel_pos_interpolate.csv",
+        "./data/ucy/univ/pixel_pos_interpolate.csv",
+        "./data/ucy/zara/zara01/pixel_pos_interpolate.csv",
+        #"./data/ucy/zara/zara02/pixel_pos_interpolate.csv"
+        ]
+    train(8, 20, file_names)
 
 
 if __name__ == "__main__":
